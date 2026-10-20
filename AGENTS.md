@@ -23,6 +23,8 @@ skills/
 | `python` | Style guide | Writing, editing or reviewing Python code |
 | `python-containers` | Environment guide | Creating a Python project, or working in one with the Compose development setup |
 | `python-tools` | Tooling guide | Setting up, configuring, testing, building or shipping a Python project; pydantic; PostgreSQL |
+| `juturna-nodes` | Project guide | Writing, packaging or testing Juturna nodes |
+| `juturna-core` | Project guide | Changing the Juturna library or its tests |
 | `github-workflow` | Process agreement (opt-in) | Feature or fix work in a repository that has adopted the issue-first workflow |
 | `prerelease-review` | Process agreement (explicit request) | A request to review a release candidate, and its release follow-up |
 
@@ -51,6 +53,9 @@ workflow, `github-workflow` and `prerelease-review` rely on it.
   obvious. Prefer a short example over a paragraph of description.
 - Keep examples generic and fictional (`my_package`, `Record`). Never include
   real credentials, hosts or customer data.
+- Keep project-specific content in project skills (`juturna-*`). The generic
+  skills (`python*`, `github-workflow`, `prerelease-review`) must not
+  mention any specific project.
 - Wrap prose at about 80 columns.
 - Keep `SKILL.md` to what an agent needs every time the skill fires; move
   long or rarely needed material into `references/`.
