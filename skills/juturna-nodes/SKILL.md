@@ -1,6 +1,6 @@
 ---
 name: juturna-nodes
-description: Write, package and test nodes for Juturna, the Python library for real-time data pipelines built as DAGs of nodes. Covers the contrib node repository layout (juturna.contrib.<org>.nodes), juturna stub, config.toml arguments, the node lifecycle, messages and payloads, sources, concurrency through the transport, packaging as a namespace package, and tests. Also covers contributing nodes to the official juturna.nodes collection. Use when creating or changing a Juturna node or node repository. For changes to the Juturna library itself, use juturna-core.
+description: Write, package and test nodes for Juturna, the Python library for real-time data pipelines built as DAGs of nodes. Covers the contrib node repository layout (juturna.contrib.<org>.nodes), juturna stub, config.toml arguments, the node lifecycle, messages and payloads, sources, joining several inputs through the node state, remote (warped) nodes, concurrency through the transport, packaging as a namespace package, and tests. Also covers contributing nodes to the official juturna.nodes collection. Use when creating or changing a Juturna node or node repository. For changes to the Juturna library itself, use juturna-core.
 ---
 
 # Juturna nodes
@@ -192,8 +192,8 @@ The rules every node follows:
 
 - **Constructor.** Take each `config.toml` argument as an explicit
   parameter, plus `**kwargs`, and call `super().__init__(**kwargs)` first.
-  The builder always passes `node_name`, `pipe_name`, `synchroniser` and
-  `transport`. Only store state in `__init__`; don't open anything.
+  The builder always passes `node_name`, `pipe_name` and `transport`. Only
+  store settings in `__init__`; don't open anything.
 - **Lifecycle.** Open connections, load models, claim ports and create
   workers in `warmup()`. Release everything in `destroy()`. If you override
   `start()` or `stop()`, call `super().start()` / `super().stop()`, and stop
@@ -207,11 +207,23 @@ The rules every node follows:
   node with them (`Node[AudioPayload, ObjectPayload]`). Build or change a
   frozen payload with `Draft`, and an `ObjectPayload` by copying it to a
   `dict` and calling `ObjectPayload.from_dict(...)`.
+- **One message at a time.** `update()` receives every message from every
+  upstream node, one at a time, in arrival order; `message.creator` tells
+  them apart. A node that needs several messages before producing an output
+  keeps the pending ones in `kwargs['state']` and removes them once used.
+- **State.** `kwargs['state']` is a dict-like `State` that the pipeline
+  creates for the node and keeps for the whole run. Keep only plain values
+  in it (numbers, strings, bytes, lists, tuples, dicts, numpy arrays,
+  messages), so the node still works when warped: other values can't travel
+  to a remote node. Keep models, connections and other objects in private
+  attributes.
 - **Concurrency.** Never use `threading`, `queue` or `multiprocessing`
   directly. Get workers, queues, events and locks from the node's transport
   (`self._transport.spawn(...)`, `.new_queue(...)`, `.new_event()`), so the
   node also runs on the browser transport and on free-threaded Python. Give
   every blocking call a timeout (`juturna.meta.JUTURNA_THREAD_JOIN_TIMEOUT`).
+  Import browser-only modules (`js`, `pyodide`) inside the methods that use
+  them, so the node still imports on a desktop interpreter.
 - **Errors.** An exception raised in `update()` or a source is logged and
   counted in `health`, and the node keeps running. Still catch the errors
   you expect, log them with `self.logger` and skip the message, rather than
@@ -222,9 +234,9 @@ The rules every node follows:
   `warmup()`, or at module level only when the node can't work without
   them, and declare them in an optional extra.
 
-Read [node-api.md](references/node-api.md) for sources, multi-input
-synchronisation, payload fields, runtime reconfiguration and the other node
-helpers.
+Read [node-api.md](references/node-api.md) for sources, joining several
+inputs, payload fields, remote nodes, runtime reconfiguration and the other
+node helpers.
 
 ## Test the node
 
@@ -284,6 +296,8 @@ an example pipeline entry:
       `start()`/`stop()` call `super()`.
 - [ ] No direct `threading` or `queue` use, and every blocking call has a
       timeout.
+- [ ] If the node may run warped: its state holds only plain values, and
+      each `update()` transmits at most one message, from the update thread.
 - [ ] Dependencies are declared in `pyproject.toml`, heavy ones in an extra.
 - [ ] The wheel has no `juturna/__init__.py` or `juturna/contrib/__init__.py`.
 - [ ] Unit and pipeline tests pass, and the README is complete.

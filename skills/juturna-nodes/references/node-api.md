@@ -13,12 +13,11 @@ All hooks are optional to override.
 | `configure()` | right after `__init__` | resolve derived settings, such as claiming a free port for `port = 0` with `juturna.utils.net_utils.get_available_port()` |
 | `warmup()` | on `pipeline.warmup()` | open connections, load models, prepare templates, create (not start) workers, call `set_source()` |
 | `start()` | on `pipeline.start()` | start your own workers, then call `super().start()` |
-| `update(message, **kwargs)` | for each delivered message or batch | process input and `transmit()` results |
+| `update(message, **kwargs)` | for each message from any upstream node, one at a time | process input and `transmit()` results |
 | `set_on_config(prop, value)` | on `pipeline.update_node(...)` | change a setting at runtime |
 | `stop()` | on `pipeline.stop()` | call `super().stop()`, signal your workers and join them with a timeout |
 | `destroy()` | on `pipeline.destroy()` | close connections, free models and other resources |
 | `configuration` (property) | by the service and telemetry | extend `super().configuration` with the settings worth reporting |
-| `next_batch(sources)` | by the buffer, for multi-input nodes | release messages from several inputs together (see below) |
 
 Pipelines start nodes from sinks to sources and stop them from sources to
 sinks, so a node never receives messages before it has started.
@@ -81,7 +80,7 @@ Payloads are frozen dataclasses from `juturna.payloads`:
 | `VideoPayload` | `video` (list of `ImagePayload`), `frames_per_second`, `codec`, `start`, `end` |
 | `BytesPayload` | `cnt` (bytes) |
 | `ObjectPayload` | an immutable `dict`, built with `ObjectPayload.from_dict(...)` |
-| `Batch` | `messages` (tuple of messages) |
+| `Batch` | `messages` (tuple of messages), for a node that transmits several messages as one |
 | `BasePayload` | the base class, as a placeholder type |
 
 Build a frozen payload step by step with a `Draft`:
@@ -149,40 +148,85 @@ Or run your own worker (a server, a socket reader) and feed the node with
 start it in `start()`, and stop it in `stop()` with an event and a join
 timeout.
 
-## Multiple inputs
+## Multiple inputs and state
 
-A node with several upstream nodes receives their messages through a
-synchroniser. The default, `passthrough`, delivers every message as soon as
-it arrives. To deliver messages from several inputs together, define
-`next_batch`:
+`update()` receives the messages of every upstream node one at a time, in
+the order they reach the node's queue; `message.creator` tells which node
+sent each one. There is no buffer or synchroniser. A node that needs
+messages from several inputs before producing an output keeps the pending
+ones in its state and removes them once they are used:
 
 ```python
-def next_batch(self, sources: dict[str, list[Message]]) -> dict[str, list[int]]:
-    if not all(sources.get(name) for name in ('audio', 'video')):
-        return dict()
+class Joiner(Node[ObjectPayload, ObjectPayload]):
+    """Pair the n-th message of the audio and video inputs"""
 
-    return {'audio': [0], 'video': [0]}
+    _INPUTS = ('audio', 'video')
+
+    def update(self, message: Message[ObjectPayload], **kwargs):
+        """Wait until every input has a message, then transmit a pair"""
+        pending = kwargs['state'].setdefault('pending', dict())
+        pending.setdefault(message.creator, list()).append(message)
+
+        if not all(pending.get(name) for name in self._INPUTS):
+            return
+
+        first = {name: pending[name].pop(0) for name in self._INPUTS}
+        to_send = Message[ObjectPayload](
+            creator=self.name,
+            version=first['audio'].version,
+            payload=ObjectPayload.from_dict(
+                {name: m.payload['value'] for name, m in first.items()}
+            ),
+            timers_from=first['audio'],
+        )
+
+        self.transmit(to_send)
 ```
 
-- `sources` maps each message `creator` to its pending messages, and the
-  result maps creators to the indexes to deliver. The creator is the
-  upstream node's name when that node builds its messages with
-  `creator=self.name`, so do that in every node you write.
-- When one message is released, `update()` receives it as is. When several
-  are, it receives a `Message[Batch]` whose `payload.messages` holds them.
-- A node that defines `next_batch` uses it by default. A pipeline can force
-  the default with `"sync": "passthrough"` on the node entry.
+- Bound what you keep: drop pending messages that are too old or too many,
+  or the state grows without limit when one input stops.
+- The creator is the upstream node's name when that node builds its
+  messages with `creator=self.name`, so do that in every node you write.
 
-## State
-
-`update()` receives `kwargs['state']`, a dict-like `State` that the pipeline
-keeps for the node across messages. Use it for per-node data you want the
-pipeline to own; use private attributes for everything else.
+`kwargs['state']` is a dict-like `State` that the pipeline creates for the
+node at warmup and keeps for the whole run, even if the node itself is
+stopped. Use it for data that belongs to
+the stream (pending messages, counters, the last seen values); keep
+settings, models, connections and other objects in private attributes. Keep
+only plain values in it: `None`, booleans, numbers, strings, bytes, lists,
+tuples, frozensets, dicts, numpy arrays and scalars, and messages. Those are
+the types that reach a remote node.
 
 ## Remote nodes
 
-A pipeline can run a node on another host by marking it `"warped": true`
-with a `warp_configuration`: the pipeline replaces it with a `Warp` node that
-talks to a server started with `juturna remotize`. The remote host needs the
-same node package installed. Nodes that keep all their I/O in the lifecycle
-hooks, and only exchange data through messages, work remotely unchanged.
+A pipeline can run a node on another host by marking its entry
+`"warped": true`, with a `warp_configuration`. The pipeline replaces it with
+a `Warp` node (from the official collection, `warp` extra) that sends each
+message to a service started on the remote host with:
+
+```bash
+python -m juturna remotize --node-name transcriber \
+  --node-type contrib.my_org.nodes.Transcriber --port 45000
+```
+
+The remote host needs the same node package installed, and the
+`warp_configuration` points `grpc_host` and `grpc_port` at the service. The
+`sticky` key of the warped entry tells where the node state lives:
+
+- `"sticky": true` (the default): the remote service keeps the state, so the
+  warp node must always reach the same service.
+- `"sticky": false`: the state travels with every request and comes back
+  with the response, so any replica behind a load balancer can serve it.
+  Keep the state small.
+
+To make a node work remotely:
+
+- Keep only plain values in its state, `meta` and `ObjectPayload` values
+  (see above). Other values are left out with a warning, or fail the request
+  when the service runs with `--strict`.
+- Transmit at most one message per `update()`, from the update thread: the
+  service answers with the first message transmitted, when `update()`
+  returns. Later messages, and messages transmitted by the node's own
+  workers, never reach the pipeline.
+- Keep all I/O in the lifecycle hooks, so the node starts the same way
+  locally and remotely.

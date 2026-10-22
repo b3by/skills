@@ -51,6 +51,17 @@ src/juturna/nodes/
   the core version it will be released with: an API the node uses may have
   changed or been removed there.
 
+## Tests
+
+Tests live in `tests/`, one file per node (`tests/test_warp.py`), and run
+with `pytest` after installing the `test` extra. A test that needs a node's
+optional dependencies skips without them, so the suite runs with any set of
+extras:
+
+```python
+grpc = pytest.importorskip('grpc')
+```
+
 ## Documentation
 
 A new node needs, besides its folder `README.md`:

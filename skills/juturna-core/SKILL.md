@@ -1,6 +1,6 @@
 ---
 name: juturna-core
-description: Contribute to the Juturna core library, the Python framework for real-time data pipelines built as DAGs of nodes. Covers the development setup, the checks CI runs (including free-threaded Python), the architecture, the rules for concurrency through the transport layer, the pipeline lifecycle, the node contract that external node packages depend on, registries, tests and docs. Use when changing the Juturna library or its tests. For writing nodes, use juturna-nodes.
+description: Contribute to the Juturna core library, the Python framework for real-time data pipelines built as DAGs of nodes. Covers the development setup, the checks CI runs (including free-threaded Python), the architecture, the rules for concurrency through the transport layer, the pipeline lifecycle, the node contract that external node packages depend on, the remote service and its wire protocol, registries, tests and docs. Use when changing the Juturna library or its tests. For writing nodes, use juturna-nodes.
 ---
 
 # Juturna core
@@ -48,13 +48,14 @@ pre-commit run --hook-stage manual bandit --all-files
 
 ```text
 juturna/
-  components/   Pipeline, Node, Message, Buffer, State, synchronisers, DAG,
-                node builder, pipeline exceptions
+  components/   Pipeline, Node, Message, State, DAG, node builder,
+                pipeline exceptions
   payloads/     frozen payload dataclasses and Draft
   transport/    TransportBackend protocol; threading and browser backends
   telemetry/    telemetry managers: memory, csv, browser
-  remotizer/    gRPC remote nodes (warp, remotize)
-  cli/          python -m juturna commands, HTTP service, PipelineManager
+  remotizer/    protobuf wire format and converters for remote nodes
+  cli/          python -m juturna commands, HTTP service, PipelineManager,
+                remote node service (remotize)
   meta/         tunable constants, overridable by environment variables
   names/        StrEnum status names
   utils/        logging, env vars, safe names, networking helpers
@@ -100,14 +101,19 @@ repository) depend on:
 
 - the `Node` hooks and helpers (`__init__(**kwargs)`, `configure`, `warmup`,
   `start`, `stop`, `update(message, **kwargs)`, `set_on_config`,
-  `destroy`, `next_batch`, `transmit`, `put`, `set_source`,
-  `prepare_template`, `dump_json`, `pipe_path`, `static_path`, `logger`);
+  `destroy`, `transmit`, `put`, `set_source`, `prepare_template`,
+  `dump_json`, `pipe_path`, `static_path`, `logger`);
+- the delivery model: `update()` gets every message one at a time, in queue
+  order, with the pipeline-owned `State` in `kwargs['state']`, which
+  outlives the node's own `stop()` and `kill()`;
 - `Message`, the payload classes and `Draft`;
 - the builder rules: `config.toml` `[arguments]` as the argument whitelist,
   `$JT_ENV_` resolution, and the `juturna.nodes`, `juturna.contrib` and
   `juturna.extensions` namespaces;
 - `juturna.components._node_builder._utils._lazy_node_loaders` and
-  `juturna.meta` constants, even where their names are private.
+  `juturna.meta` constants, even where their names are private;
+- the remote protocol: the `Warp` node of the official collection talks to
+  `juturna remotize` services of the same protocol version.
 
 A change to any of them is a breaking change: mark the commit with `!` and
 a `BREAKING CHANGE:` footer, update the docs, and list the affected node
@@ -118,17 +124,35 @@ that nodes import breaks them at import time.
 
 - Messages are frozen by `transmit()`. Payloads are frozen dataclasses that
   expose `size_bytes` for telemetry. A new payload type also needs
-  `serialize`, `Draft` support, and a path through every transport and the
-  remotizer.
+  `serialize`, `Draft` support, a path through every transport, and a
+  protobuf message with its converters in the remotizer.
 - Add tunables to `juturna/meta/_constants.py`, so they can be overridden
   by an environment variable with the same name. Don't hardcode timeouts or
   sizes.
 - Pipeline names, node names and telemetry file names become paths: check
   them with `juturna.utils.jt_utils.check_name`. The HTTP service only
   resolves environment variables from its allowlist; keep it that way.
-- Add a backend (transport, telemetry manager, synchroniser, CLI command)
-  by implementing its protocol and adding it to its registry. Don't
+- Add a backend (transport, telemetry manager, CLI command) by
+  implementing its protocol and adding it to its registry. Don't
   special-case it in callers.
+
+### Remote nodes
+
+- Messages, `meta`, `ObjectPayload` values and node states keep their exact
+  types on the wire. A value the protocol can't carry is left out with one
+  warning per client and kind of loss, or fails the request with
+  `DATA_LOSS` when the service runs with `--strict`. Never drop data
+  silently.
+- The service answers each request when the node's `update()` returns, with
+  the first message it transmitted or none, through the node's update
+  observer. Keep `Node.link_update_observer` and `link_state_resolver`
+  working: the service relies on them to swap the state per request.
+- Sticky services keep each client's state; stateless ones receive and
+  return it with every request. Support both in every change.
+- After editing `remotizer/protos/*.proto`, regenerate `remotizer/c_protos/`
+  from the `remotizer` folder with `./compile_protos.sh` (needs
+  `grpcio-tools`), and commit the generated files with the change. A
+  protocol change is breaking for every `Warp` client.
 
 ### Public API and style
 
